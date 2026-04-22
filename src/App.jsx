@@ -1,7 +1,6 @@
 import { useState, useRef, useCallback } from "react";
 
 // ─── QUESTION FRAMEWORK ──────────────────────────────────────────────────────
-// Deep mode: max ~12-14 questions per track = ~25 min interview
 const TRACKS = {
   ideaOwner: {
     label: "Idea Owner",
@@ -116,6 +115,21 @@ const TRACKS = {
     ]
   }
 };
+
+// ─── API HELPER ──────────────────────────────────────────────────────────────
+const API_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY;
+
+const callClaude = (body) =>
+  fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": API_KEY,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify(body),
+  });
 
 // ─── SYSTEM PROMPT ───────────────────────────────────────────────────────────
 const BUSINESS_CASE_PROMPT = `You are an expert business case writer bridging innovation thinking with corporate decision-making. Transform raw inputs into a structured, professional business case for CEO-level decisions.
@@ -288,7 +302,6 @@ RULES:
 ---
 *Sources used: [list input sources]. For questions contact the innovation lead.*`;
 
-// Prompt to analyse question coverage
 const COVERAGE_PROMPT = (allInputText) => `You are analysing innovation inputs to determine which interview questions have already been answered.
 
 Given the inputs below, evaluate each question ID and return a JSON object with this exact shape:
@@ -300,7 +313,7 @@ Given the inputs below, evaluate each question ID and return a JSON object with 
 
 Rules:
 - "covered" = the inputs contain a clear, substantive answer to this question
-- "partial" = the inputs touch on the topic but the answer is incomplete or vague  
+- "partial" = the inputs touch on the topic but the answer is incomplete or vague
 - "missing" = the inputs contain no useful answer to this question
 
 Return ONLY the JSON object. No preamble, no explanation, no markdown fences.
@@ -357,7 +370,7 @@ export default function App() {
   const [title, setTitle] = useState('');
   const [generating, setGenerating] = useState(false);
   const [result, setResult] = useState('');
-  const [coverage, setCoverage] = useState(null); // { questionId: 'covered'|'partial'|'missing' }
+  const [coverage, setCoverage] = useState(null);
   const [error, setError] = useState('');
   const [progress, setProgress] = useState('');
   const [activeTab, setActiveTab] = useState('input');
@@ -415,41 +428,42 @@ export default function App() {
   };
 
   const generate = async () => {
+    if (!API_KEY) {
+      setError('API key not found. Make sure VITE_ANTHROPIC_API_KEY is set in your .env file and restart the dev server.');
+      return;
+    }
     const hasContent = inputs.some(i => i.content.trim() || i.base64);
     if (!hasContent) { setError('Add at least one input.'); return; }
     setError(''); setGenerating(true); setResult(''); setCoverage(null);
 
     try {
-      // Run both API calls in parallel
       setProgress('Generating business case & analysing question coverage...');
 
       const userContent = buildUserContent();
       const allText = getAllInputText();
 
       const [bcRes, covRes] = await Promise.all([
-        fetch("https://api.anthropic.com/v1/messages", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model: "claude-sonnet-4-20250514",
-            max_tokens: 8000,
-            system: BUSINESS_CASE_PROMPT,
-            messages: [{ role: "user", content: [...userContent, { type: 'text', text: 'Generate the complete business case. Label everything FACTUAL, ASSUMED, or UNKNOWN. Write for a CEO audience.' }] }]
-          })
+        callClaude({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 8000,
+          system: BUSINESS_CASE_PROMPT,
+          messages: [{ role: "user", content: [...userContent, { type: 'text', text: 'Generate the complete business case. Label everything FACTUAL, ASSUMED, or UNKNOWN. Write for a CEO audience.' }] }]
         }),
-        fetch("https://api.anthropic.com/v1/messages", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model: "claude-sonnet-4-20250514",
-            max_tokens: 2000,
-            messages: [{ role: "user", content: COVERAGE_PROMPT(allText) }]
-          })
+        callClaude({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 2000,
+          messages: [{ role: "user", content: COVERAGE_PROMPT(allText) }]
         })
       ]);
 
-      if (!bcRes.ok) throw new Error(`API error: ${bcRes.status}`);
-      if (!covRes.ok) throw new Error(`Coverage API error: ${covRes.status}`);
+      if (!bcRes.ok) {
+        const errData = await bcRes.json().catch(() => ({}));
+        throw new Error(errData?.error?.message || `API error: ${bcRes.status}`);
+      }
+      if (!covRes.ok) {
+        const errData = await covRes.json().catch(() => ({}));
+        throw new Error(errData?.error?.message || `Coverage API error: ${covRes.status}`);
+      }
 
       const [bcData, covData] = await Promise.all([bcRes.json(), covRes.json()]);
 
@@ -494,7 +508,6 @@ export default function App() {
 
   const track = TRACKS[activeTrack];
   const summary = coverageSummary(track);
-
   const inputCount = inputs.filter(i => i.content.trim() || i.base64).length;
 
   return (
@@ -553,9 +566,8 @@ export default function App() {
         @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
         .err{font-family:'DM Mono',monospace;font-size:11px;color:#d44;background:#160808;border:1px solid #2a1010;padding:12px 16px;margin-top:14px}
 
-        /* QUESTIONS TAB */
         .track-tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:24px}
-        .track-btn{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;padding:10px 16px;background:none;border:1px solid #1e1e24;color:#3a3a3a;cursor:pointer;transition:all .2s;position:relative}
+        .track-btn{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;padding:10px 16px;background:none;border:1px solid #1e1e24;color:#3a3a3a;cursor:pointer;transition:all .2s}
         .track-btn.on{border-color:var(--c);color:var(--c);background:rgba(255,255,255,.02)}
 
         .mode-row{display:flex;align-items:center;gap:16px;margin-bottom:28px}
@@ -570,7 +582,7 @@ export default function App() {
 
         .q-section{margin-bottom:4px}
         .q-sec-hdr{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:#333;padding:18px 0 8px;border-top:1px solid #141418;margin-top:8px}
-        .q-item{display:flex;gap:14px;align-items:flex-start;padding:13px 16px;background:#0f0f11;border:1px solid #141418;margin-bottom:6px;transition:border-color .2s}
+        .q-item{display:flex;gap:14px;align-items:flex-start;padding:13px 16px;background:#0f0f11;border:1px solid #141418;margin-bottom:6px}
         .q-item.cov-covered{border-left:3px solid #4caf50}
         .q-item.cov-partial{border-left:3px solid #ff9800}
         .q-item.cov-missing{border-left:3px solid #1e1e24}
@@ -584,7 +596,6 @@ export default function App() {
         .leg-item{display:flex;align-items:center;gap:6px;font-family:'DM Mono',monospace;font-size:10px;color:#444;letter-spacing:.06em}
         .leg-line{width:16px;height:3px;border-radius:2px}
 
-        /* RESULT TAB */
         .res-bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}
         .res-lbl{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.24em;text-transform:uppercase;color:#c8a96e}
         .copy-btn{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;background:none;border:1px solid #1e1e24;color:#444;padding:8px 16px;cursor:pointer;transition:all .2s}
@@ -611,6 +622,7 @@ export default function App() {
         .tag-needs{font-family:'DM Mono',monospace;font-size:11px;background:#060e18;color:#5b9bd5;padding:3px 9px;border:1px solid #0c1e30;display:inline-block;margin:3px 0}
 
         .empty-state{text-align:center;padding:60px 20px;font-family:'DM Mono',monospace;font-size:11px;color:#2a2a2a;letter-spacing:.1em}
+        .api-warn{font-family:'DM Mono',monospace;font-size:11px;color:#ff9800;background:#161000;border:1px solid #2e2000;padding:12px 16px;margin-bottom:24px;letter-spacing:.04em}
 
         @media(max-width:600px){.doc{padding:24px 16px}.shell{padding:28px 14px}.tabs{overflow-x:auto}}
         @keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
@@ -623,10 +635,18 @@ export default function App() {
           <div className="subtitle">Transcripts · Documents · Notes → Decision-ready business case</div>
         </div>
 
+        {!API_KEY && (
+          <div className="api-warn">
+            ⚠ No API key detected. Create a <strong>.env</strong> file in your project root with:<br/>
+            <code>VITE_ANTHROPIC_API_KEY=sk-ant-your-key-here</code><br/>
+            Then restart the dev server with <code>npm run dev</code>.
+          </div>
+        )}
+
         <div className="tabs">
           <button className={`tab ${activeTab === 'input' ? 'on' : ''}`} onClick={() => setActiveTab('input')}>
             ◈ Input
-            {inputCount > 0 && <span className={`tab-badge ${inputCount > 0 ? 'ready' : ''}`}>{inputCount}</span>}
+            {inputCount > 0 && <span className="tab-badge ready">{inputCount}</span>}
           </button>
           <button className={`tab ${activeTab === 'questions' ? 'on' : ''}`} onClick={() => setActiveTab('questions')}>
             ? Interview Guide
@@ -637,7 +657,6 @@ export default function App() {
           </button>
         </div>
 
-        {/* ── INPUT ── */}
         {activeTab === 'input' && (
           <div>
             <label className="lbl">Initiative / Idea Title</label>
@@ -678,7 +697,7 @@ export default function App() {
 
             <button className="add-btn" onClick={addInput}>+ Add another input</button>
 
-            <button className="gen-btn" onClick={generate} disabled={generating}>
+            <button className="gen-btn" onClick={generate} disabled={generating || !API_KEY}>
               {generating
                 ? <><span style={{ display: 'inline-block', animation: 'spin 1s linear infinite' }}>◎</span>Generating...</>
                 : '◈ Generate Business Case + Analyse Coverage'}
@@ -688,7 +707,6 @@ export default function App() {
           </div>
         )}
 
-        {/* ── INTERVIEW GUIDE ── */}
         {activeTab === 'questions' && (
           <div>
             <div className="track-tabs">
@@ -698,20 +716,14 @@ export default function App() {
                   <button key={key} className={`track-btn ${activeTrack === key ? 'on' : ''}`}
                     style={{ '--c': t.color }} onClick={() => setActiveTrack(key)}>
                     {t.icon} {t.label}
-                    {sum && (
-                      <span style={{ marginLeft: 8, fontFamily: 'DM Mono,monospace', fontSize: 9, opacity: .7 }}>
-                        {sum.covered}/{sum.total}
-                      </span>
-                    )}
+                    {sum && <span style={{ marginLeft: 8, fontFamily: 'DM Mono,monospace', fontSize: 9, opacity: .7 }}>{sum.covered}/{sum.total}</span>}
                   </button>
                 );
               })}
             </div>
 
             <div style={{ padding: '10px 14px', background: '#0f0f11', border: '1px solid #161618', marginBottom: 20 }}>
-              <span style={{ fontFamily: 'DM Mono,monospace', fontSize: 11, color: '#444', letterSpacing: '.04em' }}>
-                {track.role}
-              </span>
+              <span style={{ fontFamily: 'DM Mono,monospace', fontSize: 11, color: '#444', letterSpacing: '.04em' }}>{track.role}</span>
             </div>
 
             <div className="mode-row">
@@ -732,9 +744,9 @@ export default function App() {
 
             {coverage && (
               <div className="legend">
-                <div className="leg-item"><div className="leg-line" style={{ background: '#4caf50' }} />Covered in your inputs</div>
-                <div className="leg-item"><div className="leg-line" style={{ background: '#ff9800' }} />Partial — needs more</div>
-                <div className="leg-item"><div className="leg-line" style={{ background: '#2a2a2a' }} />Missing — ask this</div>
+                <div className="leg-item"><div className="leg-line" style={{ background: '#4caf50' }} />Covered</div>
+                <div className="leg-item"><div className="leg-line" style={{ background: '#ff9800' }} />Partial</div>
+                <div className="leg-item"><div className="leg-line" style={{ background: '#2a2a2a' }} />Missing</div>
               </div>
             )}
 
@@ -781,7 +793,6 @@ export default function App() {
           </div>
         )}
 
-        {/* ── RESULT ── */}
         {activeTab === 'result' && (
           <div>
             {result ? (
@@ -795,7 +806,7 @@ export default function App() {
                 <div className="doc" dangerouslySetInnerHTML={{ __html: renderMarkdown(result) }} />
               </>
             ) : (
-              <div className="empty-state">No business case generated yet.<br/>Add inputs and generate.</div>
+              <div className="empty-state">No business case generated yet.<br />Add inputs and generate.</div>
             )}
           </div>
         )}
