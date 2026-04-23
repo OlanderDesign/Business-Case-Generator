@@ -444,13 +444,13 @@ export default function App() {
 
       const [bcRes, covRes] = await Promise.all([
         callClaude({
-          model: "claude-sonnet-4-20250514",
+          model: "claude-sonnet-4-5",
           max_tokens: 8000,
           system: BUSINESS_CASE_PROMPT,
           messages: [{ role: "user", content: [...userContent, { type: 'text', text: 'Generate the complete business case. Label everything FACTUAL, ASSUMED, or UNKNOWN. Write for a CEO audience.' }] }]
         }),
         callClaude({
-          model: "claude-sonnet-4-20250514",
+          model: "claude-sonnet-4-5",
           max_tokens: 2000,
           messages: [{ role: "user", content: COVERAGE_PROMPT(allText) }]
         })
