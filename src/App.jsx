@@ -175,6 +175,8 @@ const callClaude = (body) => fetch("https://api.anthropic.com/v1/messages", {
 });
 
 // ─── PROMPTS ─────────────────────────────────────────────────────────────────
+const TODAY = new Date().toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'});
+
 const BC_PROMPT = `You are a senior innovation consultant writing a business case that will be sent as a PDF to a CEO. You write like a trusted advisor — warm, direct, confident, and human. Not a template filler.
 
 WRITING STYLE:
@@ -195,7 +197,7 @@ OUTPUT — clean markdown that pastes perfectly into Notion:
 
 [One compelling sentence that captures what this is and why it matters.]
 
-**Version:** v[N] | **Confidence:** [Low / Medium / High] | **Date:** [today]
+**Version:** v[N] | **Confidence:** [Low / Medium / High] | **Date:** ${TODAY}
 
 ---
 
@@ -346,21 +348,8 @@ ${text}`;
 
 // ─── MARKDOWN RENDERER ───────────────────────────────────────────────────────
 function renderMd(text) {
-  let h = text
-    .replace(/^---$/gm,'<hr/>')
-    .replace(/^# (.+)$/gm,'<h1>$1</h1>')
-    .replace(/^## (.+)$/gm,'<h2>$1</h2>')
-    .replace(/^### (.+)$/gm,'<h3>$1</h3>')
-    .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g,'<em>$1</em>')
-    .replace(/`(.+?)`/g,'<code>$1</code>')
-    .replace(/^> (.+)$/gm,'<blockquote>$1</blockquote>')
-    .replace(/\[NEEDS INPUT:([^\]]+)\]/g,'<span class="tn">NEEDS INPUT:$1</span>')
-    .replace(/\[FACTUAL\]/g,'<span class="tf">FACTUAL</span>')
-    .replace(/\[ASSUMED\]/g,'<span class="ta">ASSUMED</span>')
-    .replace(/\[UNKNOWN\]/g,'<span class="tu">UNKNOWN</span>');
-
-  h = h.replace(/(\|.+\|\n)+/g,(t)=>{
+  // Step 1: Tables FIRST — before any replacements that could break pipe detection
+  let h = text.replace(/(\|.+\|\n)+/g,(t)=>{
     const rows=t.trim().split('\n');
     let o='<div class="tw"><table>';
     rows.forEach((r,i)=>{
@@ -372,6 +361,25 @@ function renderMd(text) {
     return o+'</table></div>';
   });
 
+  // Step 2: Inline label badges
+  h = h
+    .replace(/\[NEEDS INPUT:([^\]]+)\]/g,'<span class="tn">NEEDS INPUT:$1</span>')
+    .replace(/\[FACTUAL\]/g,'<span class="tf">FACTUAL</span>')
+    .replace(/\[ASSUMED\]/g,'<span class="tag-assumed">ASSUMED</span>')
+    .replace(/\[UNKNOWN\]/g,'<span class="tu">UNKNOWN</span>');
+
+  // Step 3: Block-level elements
+  h = h
+    .replace(/^---$/gm,'<hr/>')
+    .replace(/^# (.+)$/gm,'<h1>$1</h1>')
+    .replace(/^## (.+)$/gm,'<h2>$1</h2>')
+    .replace(/^### (.+)$/gm,'<h3>$1</h3>')
+    .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g,'<em>$1</em>')
+    .replace(/`(.+?)`/g,'<code>$1</code>')
+    .replace(/^> (.+)$/gm,'<blockquote>$1</blockquote>');
+
+  // Step 4: Wrap remaining text in paragraphs
   h=h.split('\n\n').map(b=>{
     if(/^<(h[1-3]|hr|blockquote|div)/.test(b))return b;
     if(!b.trim())return '';
@@ -393,8 +401,13 @@ const bc=(s)=>{
 export default function App() {
   const [inputs,setInputs]=useState([{id:1,label:'Input 1',content:'',type:'text',file:null}]);
   const [title,setTitle]=useState('');
+  const [previousCase,setPreviousCase]=useState('');
+  const [prevExpanded,setPrevExpanded]=useState(false);
   const [generating,setGenerating]=useState(false);
   const [result,setResult]=useState('');
+  const [savedResult,setSavedResult]=useState(()=>{
+    try{return localStorage.getItem('bc_last_result')||'';}catch{return'';}
+  });
   const [coverage,setCoverage]=useState(null);
   const [blocks,setBlocks]=useState(null);
   const [error,setError]=useState('');
@@ -437,6 +450,7 @@ export default function App() {
   const buildContent=()=>{
     const parts=[];
     if(title)parts.push(`INITIATIVE: ${title}`);
+    if(previousCase.trim())parts.push(`--- PREVIOUS BUSINESS CASE (revise and improve from this) ---\n${previousCase.trim()}`);
     inputs.forEach(inp=>{if(inp.type==='text'&&inp.content.trim())parts.push(`--- ${inp.label.toUpperCase()} ---\n${inp.content.trim()}`);});
     const content=[];
     if(parts.length)content.push({type:'text',text:parts.join('\n\n')});
@@ -446,18 +460,82 @@ export default function App() {
 
   const getAllText=()=>{
     const p=[];if(title)p.push(title);
+    if(previousCase.trim())p.push(previousCase.trim());
     inputs.forEach(inp=>{if(inp.content.trim())p.push(inp.content.trim());});
     return p.join('\n\n');
   };
 
   const useAsInput=()=>{
-    if(!result)return;
-    const vMatch=result.match(/\*\*Version:\*\* v(\d+)/);
+    const source=result||savedResult;
+    if(!source)return;
+    const vMatch=source.match(/\*\*Version:\*\* v(\d+)/);
     const nextV=vMatch?parseInt(vMatch[1])+1:2;
-    setInputs(p=>[...p,{id:Date.now(),label:'Previous Business Case — for revision',content:result,type:'text',file:null}]);
-    setNote(`Previous case loaded as input. Add new notes and regenerate for v${nextV}.`);
+    setPreviousCase(source);
+    setPrevExpanded(true);
+    setNote(`Previous case loaded. Add new inputs and regenerate for v${nextV}.`);
     setActiveTab('input');
     setTimeout(()=>setNote(''),5000);
+  };
+
+  const exportGuide=()=>{
+    const blockInfo=(id)=>{
+      if(!blocks)return{s:'missing',icon:'⬜',label:'No data yet'};
+      const s=blocks[id]||'missing';
+      const map={strong:{icon:'🟢',label:'Strong'},partial:{icon:'🟡',label:'Partial'},weak:{icon:'🔴',label:'Weak'},missing:{icon:'⬜',label:'Missing'}};
+      return{s,...(map[s]||map.missing)};
+    };
+
+    const qLine=(q,i,cov)=>{
+      const s=cov?(cov[q.id]||'missing'):'missing';
+      if(s==='covered') return`- ✅ Q${i+1}. ${q.text}`;
+      if(s==='partial') return`- ⚠️ Q${i+1}. ${q.text}`;
+      return`- ❓ Q${i+1}. ${q.text}`;
+    };
+
+    // Build Notion-paste-friendly markdown
+    let doc=`# Health & Interview Guide\n`;
+    doc+=`*Generated: ${TODAY}*\n\n`;
+    doc+=`---\n\n`;
+
+    // Health section
+    doc+=`## Business Case Health\n\n`;
+    BUILDING_BLOCKS.forEach(b=>{
+      const{icon,label}=blockInfo(b.id);
+      doc+=`${icon} **${b.label}** — ${label}  *(${b.desc})*\n`;
+    });
+
+    doc+=`\n> 🟢 Strong  🟡 Partial  🔴 Weak  ⬜ Missing\n\n`;
+    doc+=`---\n\n`;
+
+    // Interview guides
+    doc+=`## Interview Guides — Quick Mode\n\n`;
+    doc+=`> ✅ Covered in your inputs   ⚠️ Partial — needs more   ❓ Missing — ask this\n\n`;
+
+    Object.entries(TRACKS).forEach(([,t])=>{
+      const ids=t.quick.map(q=>q.id);
+      const covered=coverage?ids.filter(id=>coverage[id]==='covered').length:0;
+      const total=ids.length;
+      const pct=coverage?`${covered}/${total} covered`:'Not yet analysed — generate a business case first';
+
+      doc+=`---\n\n`;
+      doc+=`### ${t.icon} ${t.label}\n`;
+      doc+=`*${t.role}*\n`;
+      doc+=`> Coverage: **${pct}**\n\n`;
+      t.quick.forEach((q,i)=>{ doc+=qLine(q,i,coverage)+'\n'; });
+      doc+='\n';
+    });
+
+    doc+=`---\n\n`;
+    doc+=`## Notes\n\n`;
+    doc+=`*Add your notes here after interviews...*\n`;
+
+    navigator.clipboard.writeText(doc).then(()=>{
+      setNote('Health & Interview Guide copied — paste directly into Notion');
+      setTimeout(()=>setNote(''),4000);
+    }).catch(()=>{
+      setNote('Copy failed — try again');
+      setTimeout(()=>setNote(''),3000);
+    });
   };
 
   const generate=async()=>{
@@ -474,7 +552,10 @@ export default function App() {
       if(!bcRes.ok){const e=await bcRes.json().catch(()=>({}));throw new Error(e?.error?.message||`Error ${bcRes.status}`);}
       if(!covRes.ok){const e=await covRes.json().catch(()=>({}));throw new Error(e?.error?.message||`Error ${covRes.status}`);}
       const [bcData,covData]=await Promise.all([bcRes.json(),covRes.json()]);
-      setResult(bcData.content.map(b=>b.text||'').join('\n'));
+      const bcText=bcData.content.map(b=>b.text||'').join('\n');
+      setResult(bcText);
+      setSavedResult(bcText);
+      try{localStorage.setItem('bc_last_result',bcText);}catch{}
       try{
         const raw=covData.content.map(b=>b.text||'').join('\n').replace(/```json|```/g,'').trim();
         const parsed=JSON.parse(raw);
@@ -502,7 +583,7 @@ export default function App() {
 
   const track=TRACKS[activeTrack];
   const trackSum=tSum(track);
-  const inputCount=inputs.filter(i=>i.content.trim()||i.base64).length;
+  const inputCount=inputs.filter(i=>i.content.trim()||i.base64).length+(previousCase.trim()?1:0);
 
   return(
     <div className="app">
@@ -620,9 +701,9 @@ export default function App() {
         .doc tr:last-child td{border-bottom:none;}
         .doc tr:hover td{background:#FAFAF8;}
         .tf{display:inline-block;font-size:10px;font-weight:700;background:#DCFCE7;color:#15803D;padding:2px 7px;border-radius:5px;border:1px solid #BBF7D0;letter-spacing:.04em;}
-        .ta{display:inline-block;font-size:10px;font-weight:700;background:#FEF9C3;color:#A16207;padding:2px 7px;border-radius:5px;border:1px solid #FDE68A;letter-spacing:.04em;}
+        .tag-assumed{display:inline-block;font-size:10px;font-weight:700;background:#FEF9C3;color:#A16207;padding:2px 7px;border-radius:5px;border:1px solid #FDE68A;letter-spacing:.04em;}
         .tu{display:inline-block;font-size:10px;font-weight:700;background:#FEE2E2;color:#B91C1C;padding:2px 7px;border-radius:5px;border:1px solid #FECACA;letter-spacing:.04em;}
-        .tn{display:inline-block;font-size:10px;font-weight:700;background:#EFF6FF;color:#2563EB;padding:3px 9px;border-radius:5px;border:1px solid #BFDBFE;margin:2px 0;}
+        .tn{display:inline-block;font-size:10px;font-weight:700;background:#EFF6FF;color:#163A5F;padding:3px 9px;border-radius:5px;border:1px solid #C8D6E3;margin:2px 0;}
         .empty{text-align:center;padding:64px 20px;font-size:13px;color:var(--txt3);}
         @media(max-width:640px){.doc{padding:28px 20px;}.shell{padding:28px 14px;}.tabs{width:100%;}.tab{flex:1;justify-content:center;padding:9px 8px;font-size:11px;}}
         @keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
@@ -643,7 +724,7 @@ export default function App() {
             Input {inputCount>0&&<span className="badge">{inputCount}</span>}
           </button>
           <button className={`tab ${activeTab==='guide'?'on':''}`} onClick={()=>setActiveTab('guide')}>
-            Interview Guide
+            Health & Interview
           </button>
           <button className={`tab ${activeTab==='result'?'on':''}`} onClick={()=>setActiveTab('result')} disabled={!result}>
             Business Case {result&&<span className="badge">✓</span>}
@@ -653,6 +734,57 @@ export default function App() {
         {/* INPUT */}
         {activeTab==='input'&&(
           <div>
+
+            {/* PREVIOUS BUSINESS CASE — always visible */}
+            <div style={{marginBottom:24}}>
+              <button
+                onClick={()=>setPrevExpanded(p=>!p)}
+                style={{width:'100%',background:previousCase?'var(--blue-l)':'var(--wh)',border:`1.5px solid ${previousCase?'var(--blue-m)':'var(--bdr)'}`,borderRadius:'var(--r)',padding:'14px 20px',display:'flex',alignItems:'center',justifyContent:'space-between',cursor:'pointer',transition:'all .18s',boxShadow:'var(--sh)'}}>
+                <div style={{display:'flex',alignItems:'center',gap:10}}>
+                  <span style={{fontSize:16}}>↺</span>
+                  <div style={{textAlign:'left'}}>
+                    <div style={{fontSize:12,fontWeight:700,color:previousCase?'var(--navy)':'var(--txt3)'}}>
+                      {previousCase?'Previous Business Case loaded':'Start from a previous business case'}
+                    </div>
+                    <div style={{fontSize:11,color:'var(--txt3)',marginTop:1}}>
+                      {previousCase
+                        ?(()=>{const v=previousCase.match(/\*\*Version:\*\* (v\d+)/);const d=previousCase.match(/\*\*Date:\*\* (.+)/);return`${v?v[1]:'version unknown'}${d?' · '+d[1].trim():''} — click to edit`;})()
+                        :'Paste or load a previous version to build on it'}
+                    </div>
+                  </div>
+                </div>
+                <div style={{display:'flex',alignItems:'center',gap:8,flexShrink:0}}>
+                  {(result||savedResult)&&!previousCase&&(
+                    <button className="act p" onClick={e=>{e.stopPropagation();useAsInput();}} style={{fontSize:11,padding:'6px 12px'}}>
+                      Load saved
+                    </button>
+                  )}
+                  <span style={{fontSize:12,color:'var(--txt3)',transform:prevExpanded?'rotate(180deg)':'none',transition:'transform .2s'}}>▾</span>
+                </div>
+              </button>
+
+              {prevExpanded&&(
+                <div style={{background:'var(--wh)',border:'1.5px solid var(--blue-m)',borderTop:'none',borderRadius:'0 0 var(--r) var(--r)',padding:'16px 20px',boxShadow:'var(--sh)'}}>
+                  {(result||savedResult)&&(
+                    <button className="act" onClick={useAsInput} style={{marginBottom:12,fontSize:11,padding:'6px 14px'}}>
+                      ↺ Load from last generated case
+                    </button>
+                  )}
+                  <textarea
+                    className="ta"
+                    style={{minHeight:140,borderTop:'1.5px solid var(--bdr)',paddingTop:12}}
+                    value={previousCase}
+                    onChange={e=>setPreviousCase(e.target.value)}
+                    placeholder="Paste any previous business case here — exported from Notion, copied from an email, or from an earlier session. The AI will treat this as the baseline and improve on it with your new inputs below."/>
+                  {previousCase&&(
+                    <button onClick={()=>{setPreviousCase('');}} style={{marginTop:10,background:'none',border:'none',fontSize:11,color:'var(--txt3)',cursor:'pointer',padding:0,textDecoration:'underline'}}>
+                      Clear
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+
             <label className="lbl">Initiative Title</label>
             <input className="title-input" placeholder="e.g. AI-powered corrosion management pilot"
               value={title} onChange={e=>setTitle(e.target.value)}/>
@@ -696,9 +828,13 @@ export default function App() {
           </div>
         )}
 
-        {/* INTERVIEW GUIDE */}
+        {/* HEALTH & INTERVIEW */}
         {activeTab==='guide'&&(
           <div>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20,flexWrap:'wrap',gap:10}}>
+              <div style={{fontSize:11,fontWeight:700,letterSpacing:'.07em',textTransform:'uppercase',color:'var(--txt3)'}}>Health & Interview Guide</div>
+              <button className="act" onClick={exportGuide} style={{display:'flex',alignItems:'center',gap:6}}>⎘ Copy for Notion</button>
+            </div>
             {/* HEALTH TRACKER */}
             <div className="tracker">
               <div className="tracker-ttl">Business Case Health</div>
@@ -792,6 +928,7 @@ export default function App() {
             )}
 
             {!coverage&&<div className="no-cov">Generate a business case first to see question coverage and health scores.</div>}
+            {note&&<div className="ok" style={{marginTop:16}}>✓ {note}</div>}
           </div>
         )}
 
@@ -806,7 +943,6 @@ export default function App() {
                     <button className="act" onClick={()=>{navigator.clipboard.writeText(result);setCopied(true);setTimeout(()=>setCopied(false),2000);}}>
                       {copied?'✓ Copied':'⎘ Copy for Notion'}
                     </button>
-                    <button className="act p" onClick={useAsInput}>↺ Use as Input for Next Version</button>
                   </div>
                 </div>
                 <div className="doc" dangerouslySetInnerHTML={{__html:renderMd(result)}}/>
